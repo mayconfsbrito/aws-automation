@@ -64,25 +64,40 @@ if [ $SUBNET_ID_2 == "None" ]
 fi
 echo "[EC2] Subnet ID [$ZONE_2]: "$SUBNET_ID_2
 
-#Internet Gateway
-EC2_INTERNET_GATEWAY_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
+#Creating (and Attaching) or Get Internet Gateway
+EC2_INTERNET_GATEWAY_ID=$(aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=${VPC_ID} --query 'InternetGateways[0].InternetGatewayId' --output text)
+if [ $EC2_INTERNET_GATEWAY_ID == "None" ]
+    then
+        printf "[EC2] Creating Internet Gateway..."
+        EC2_INTERNET_GATEWAY_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
+        echo "OK"
+        printf "[EC2] Attach Internet Gateway..."
+        aws ec2 attach-internet-gateway --internet-gateway-id ${EC2_INTERNET_GATEWAY_ID} --vpc-id ${VPC_ID}
+        echo "OK"
+fi
 echo "[EC2] Internet Gateway ID: ${EC2_INTERNET_GATEWAY_ID}"
-
-printf "[EC2] Attach Internet Gateway..."
-aws ec2 attach-internet-gateway --internet-gateway-id ${EC2_INTERNET_GATEWAY_ID} --vpc-id ${VPC_ID}
-printf "OK\n"
 
 #Route Table
 EC2_ROUTE_TABLE_ID=$(aws ec2 create-route-table --vpc-id ${VPC_ID} --query 'RouteTable.RouteTableId' --output text)
 echo "[EC2] Route Table ID: ${EC2_ROUTE_TABLE_ID}"
 
-printf "[EC2] Associate Route Table..."
-aws ec2 associate-route-table --route-table-id ${EC2_ROUTE_TABLE_ID} --subnet-id ${SUBNET_ID_1} > /dev/null
-aws ec2 associate-route-table --route-table-id ${EC2_ROUTE_TABLE_ID} --subnet-id ${SUBNET_ID_2} > /dev/null
-printf "OK\n"
+#Route Table Associations
+printf "[EC2] Checking Route Tables Associations..."
+ASSOCIATED_RTB_1=$(aws ec2 describe-route-tables --filters Name=association.subnet-id,Values=${SUBNET_ID_1} --query 'RouteTables[0].RouteTableId' --output text)
+if [ $ASSOCIATED_RTB_1 == "None" ]
+    then
+    printf "\n[EC2] Associate Route Table to Subnet 1..."
+    aws ec2 associate-route-table --route-table-id ${EC2_ROUTE_TABLE_ID} --subnet-id ${SUBNET_ID_1} > /dev/null
+fi
+ASSOCIATED_RTB_2=$(aws ec2 describe-route-tables --filters Name=association.subnet-id,Values=${SUBNET_ID_2} --query 'RouteTables[0].RouteTableId' --output text)
+if [ $ASSOCIATED_RTB_2 == "None" ]
+    then
+    printf "\n[EC2] Associate Route Table to Subnet 2..."
+    aws ec2 associate-route-table --route-table-id ${EC2_ROUTE_TABLE_ID} --subnet-id ${SUBNET_ID_2} > /dev/null
+fi
 
 #Routes
-printf "[EC2] Create Route..."
+printf "\n[EC2] Create Route..."
 aws ec2 create-route --route-table-id ${EC2_ROUTE_TABLE_ID} --destination-cidr-block 0.0.0.0/0 --gateway-id ${EC2_INTERNET_GATEWAY_ID} > /dev/null
 printf "OK\n"
 
@@ -149,8 +164,11 @@ echo "OK"
 echo "[EC2] Public DNS Name: " $EC2_DNS
 
 echo "[EC2] Installing Docker"
-ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_DNS} sudo apt-get update && sudo apt search docker && sudo apt-get install docker docker-compose
-
+ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_DNS} sudo apt-get update \
+    && sudo apt-get remove docker docker-engine docker.io -y \
+    && sudo apt-get install docker.io docker-compose -y
+    # && sudo systemctl start docker -qf \
+    # && sudo systemctl enable docker -qf
 ##echo "[EC2] Copying webapp"
 ##ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_PUBLIC_DNS} mkdir -p /home/ubuntu/webapp/
 ##scp -i "${EC2_KEYPAIR_NAME}.pem" acesso.jar ubuntu@${EC2_PUBLIC_DNS}:/home/ubuntu/webapp/
