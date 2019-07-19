@@ -163,15 +163,31 @@ done
 echo "OK"
 echo "[EC2] Public DNS Name: " $EC2_DNS
 
-echo "[EC2] Installing Docker"
-ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_DNS} sudo apt-get update \
-    && sudo apt-get remove docker docker-engine docker.io -y \
-    && sudo apt-get install docker.io docker-compose -y
-    # && sudo systemctl start docker -qf \
-    # && sudo systemctl enable docker -qf
-##echo "[EC2] Copying webapp"
-##ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_PUBLIC_DNS} mkdir -p /home/ubuntu/webapp/
-##scp -i "${EC2_KEYPAIR_NAME}.pem" acesso.jar ubuntu@${EC2_PUBLIC_DNS}:/home/ubuntu/webapp/
-#
+echo "[EC2] Installing Docker..."
+echo "\"ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}\""
+ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF 
+    curl -fsSL https://get.docker.com -o get-docker.sh > /dev/null
+    sudo sh get-docker.sh
+    sudo usermod -aG docker ubuntu
+EOF
+
+printf "\n\n[EC2] Copying webapp..."
+scp -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem acesso.jar ubuntu@${EC2_DNS}:/home/ubuntu/
+echo "OK"
+
 ##Testa a conexão com o banco de dados RDS
 ##ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_PUBLIC_DNS} 
+
+printf "\n[EC2] Running webapp through java container...\n"
+echo "ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}"
+ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF
+    docker run -p 80:9095 -v /home/ubuntu/:/usr/src/ -w /usr/src/ \
+        java:8 java -jar acesso.jar -d
+EOF
+    # -Dspring.datasource.url=jdbc:postgresql://${RDS_ENDPOINT}:${RDS_PORT}/${DB_NAME} \
+    # -Dspring.datasource.username=${RDS_USER} \
+    # -Dspring.datasource.password=${RDS_PASS} \
+
+#Deletes the instance and vpc
+aws ec2 terminate-instances --instance-ids ${EC2_INSTANCE_ID}
+aws ec2 delete-vpc --vpc-id ${VPC_ID}
