@@ -8,10 +8,12 @@
 EC2_AMI_IMAGE="ami-024a64a6685d05041" # Ubuntu Server 18.04
 EC2_SG_NAME="sg-web"
 EC2_KEYPAIR_NAME="automation-key"
+EC2_WEBAPP_JAR_FILE="acesso.jar"
 RDS_DB_USER="postgres"
 RDS_DB_PASS="passwdexemplo"
 RDS_DB_PORT=5432
 RDS_DB_NAME="acessos"
+RDS_DB_SCRIPT_FILE_NAME="acesso_init.sql"
 RDS_DB_ENGINE="postgres"
 RDS_DB_STORAGE=20
 RDS_DB_INSTANCE_CLASS="db.t2.small"
@@ -64,6 +66,29 @@ if [ $SUBNET_ID_2 == "None" ]
 fi
 echo "[EC2] Subnet ID [$ZONE_2]: "$SUBNET_ID_2
 
+# RDS Instance
+printf "[RDS] Checking RDS instance..."
+RDS_INSTANCE=$(aws rds describe-db-instances | jq '.DBInstances[] | select(.DBInstanceIdentifier | contains("'${RDS_DB_NAME}'"))')
+if [ -z "$RDS_INSTANCE" ]
+    then
+        printf "\n[RDS] Creating instance..."
+        aws rds delete-db-subnet-group --db-subnet-group-name "${RDS_SG_NAME}" 2> /dev/null
+        aws rds create-db-subnet-group --db-subnet-group-name "${RDS_SG_NAME}" --db-subnet-group-description "automation" --subnet-ids $SUBNET_ID_1 $SUBNET_ID_2 > /dev/null
+
+        RDS_INSTANCE=$(aws rds create-db-instance \
+            --db-instance-identifier postgres-${RDS_DB_NAME} \
+            --allocated-storage ${RDS_DB_STORAGE} \
+            --db-instance-class ${RDS_DB_INSTANCE_CLASS} \
+            --engine ${RDS_DB_ENGINE} \
+            --master-username ${RDS_DB_USER} \
+            --master-user-password ${RDS_DB_PASS} \
+            --db-subnet-group-name ${RDS_SG_NAME})
+        echo ${RDS_INSTANCE} >> install.log 
+fi
+#echo $RDS_INSTANCE | jq
+RDS_INSTANCE_ID=$(echo $RDS_INSTANCE | jq '.Instances[0].InstanceId')
+echo "OK"
+
 #Creating (and Attaching) or Get Internet Gateway
 EC2_INTERNET_GATEWAY_ID=$(aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=${VPC_ID} --query 'InternetGateways[0].InternetGatewayId' --output text)
 if [ $EC2_INTERNET_GATEWAY_ID == "None" ]
@@ -107,15 +132,15 @@ if [ $SG_ID == "None" ]
     then
         SG_ID=$(aws ec2 create-security-group --group-name ${EC2_SG_NAME} --vpc-id ${VPC_ID} --description "Security Group of Automation EC2-RDS" --query 'GroupId' --output text)
 fi
-echo "Security Group ID: " $SG_ID
+echo "[EC2] Security Group ID: " $SG_ID
 
+# Security Group Firewall
 echo "[EC2] Authorizing HTTP port"
 aws ec2 authorize-security-group-ingress \
     --group-id $SG_ID \
     --protocol tcp \
     --port 80 \
     --cidr 0.0.0.0/0 2> /dev/null
-
 echo "[EC2] Authorizing SSH port"
 aws ec2 authorize-security-group-ingress \
     --group-id $SG_ID \
@@ -123,6 +148,7 @@ aws ec2 authorize-security-group-ingress \
     --port 22 \
     --cidr 0.0.0.0/0 2> /dev/null
 
+# Create EC2 Instance
 echo "[EC2] Creating Instance..."
 EC2_INSTANCE=$(aws ec2 run-instances \
     --security-group-ids ${SG_ID} \
@@ -136,25 +162,12 @@ EC2_INSTANCE=$(aws ec2 run-instances \
 
 EC2_INSTANCE_ID=$(echo $EC2_INSTANCE | jq -r '.Instances[0].InstanceId')
 echo "[EC2] Instance ID: " ${EC2_INSTANCE_ID}
-echo ${EC2_INSTANCE} > install.log
+echo ${EC2_INSTANCE} >> install.log
 
-#Create DB Security Group
-aws rds create-db-subnet-group --db-subnet-group-name "rds-subnet-group" --db-subnet-group-description "automation" --subnet-ids $SUBNET_ID_1 $SUBNET_ID_2 2> /dev/null
-
-# echo "[RDS] Creating instance"
-# RDS_INSTANCE=$(aws rds create-db-instance \
-#     --db-instance-identifier postgres-${RDS_DB_NAME} \
-#     --allocated-storage ${RDS_DB_STORAGE} \
-#     --db-instance-class ${RDS_DB_INSTANCE_CLASS} \
-#     --engine ${RDS_DB_ENGINE} \
-#     --master-username ${RDS_DB_USER} \
-#     --master-user-password ${RDS_DB_PASS} \
-#     --db-subnet-group-name ${RDS_SG_NAME})
-
-
+# EC2 DNS
 printf "[EC2] Waiting Public DNS..."
 end=$((SECONDS+60))
-STR_ECS_ENDPOINT="aws ec2 describe-instances --filters Name=instance-id,Values=${EC2_INSTANCE_ID}  --query 'Reservations[0].Instances[0].PublicDnsName' --output text"
+STR_ECS_ENDPOINT="aws ec2 describe-instances --filters Name=instance-id,Values=${EC2_INSTANCE_ID} --query 'Reservations[0].Instances[0].PublicDnsName' --output text"
 EC2_DNS=$(eval $STR_ECS_ENDPOINT)
 while [[ $EC2_DNS != *"amazonaws.com"* ]] && [[ $SECONDS -lt $end ]]; do
     sleep 10s
@@ -163,8 +176,9 @@ done
 echo "OK"
 echo "[EC2] Public DNS Name: " $EC2_DNS
 
+# EC2 Docker
 echo "[EC2] Installing Docker..."
-echo "\"ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}\""
+#echo "\"ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}\""
 ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF 
     curl -fsSL https://get.docker.com -o get-docker.sh > /dev/null
     sudo sh get-docker.sh
@@ -172,22 +186,39 @@ ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bi
 EOF
 
 printf "\n\n[EC2] Copying webapp..."
-scp -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem acesso.jar ubuntu@${EC2_DNS}:/home/ubuntu/
+scp -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ${EC2_WEBAPP_JAR_FILE} ubuntu@${EC2_DNS}:/home/ubuntu/
 echo "OK"
 
+#RDS Endpoint
+printf "[RDS] Waiting Endpoint..."
+end=$((SECONDS+360))
+STR_RDS_ENDPOINT="aws rds describe-db-instances | jq '.DBInstances[] | select(.DBInstanceIdentifier | contains(\"${RDS_DB_NAME}\"))' | jq -r '.Endpoint.Address'"
+RDS_ENDPOINT=$(eval $STR_RDS_ENDPOINT)
+while [[ ${RDS_ENDPOINT} != *"amazonaws.com"* ]] && [[ $SECONDS -lt $end ]]; do
+  sleep 10s
+  RDS_ENDPOINT=$(eval $STR_RDS_ENDPOINT)
+done
+echo "OK"
+echo "[RDS] Endpoint: " ${RDS_ENDPOINT}
+
 ##Testa a conexão com o banco de dados RDS
-##ssh -i "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_PUBLIC_DNS} 
+##ssh -i -o StrictHostKeyChecking=no "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_PUBLIC_DNS} 
 
 printf "\n[EC2] Running webapp through java container...\n"
-echo "ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}"
+echo "[EC2] ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}"
 ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF
     docker run -p 80:9095 -v /home/ubuntu/:/usr/src/ -w /usr/src/ \
-        java:8 java -jar acesso.jar -d
+        java:8 \
+        java \
+        -Dspring.datasource.url=jdbc:postgresql://${RDS_ENDPOINT}:${RDS_DB_PORT}/${RDS_DB_NAME} \
+        -Dspring.datasource.username=${RDS_DB_USER} \
+        -Dspring.datasource.password=${RDS_DB_PASS} \
+        -jar ${EC2_WEBAPP_JAR_FILE} -d
 EOF
-    # -Dspring.datasource.url=jdbc:postgresql://${RDS_ENDPOINT}:${RDS_PORT}/${DB_NAME} \
+    # -Dspring.datasource.url=jdbc:postgresql://${RDS_ENDPOINT}:${RDS_PORT}/${RDS_DB_PORT} \
     # -Dspring.datasource.username=${RDS_USER} \
     # -Dspring.datasource.password=${RDS_PASS} \
 
 #Deletes the instance and vpc
-aws ec2 terminate-instances --instance-ids ${EC2_INSTANCE_ID}
-aws ec2 delete-vpc --vpc-id ${VPC_ID}
+# aws ec2 terminate-instances --instance-ids ${EC2_INSTANCE_ID}
+# aws ec2 delete-vpc --vpc-id ${VPC_ID}
