@@ -16,7 +16,7 @@ RDS_DB_NAME="acessos"
 RDS_DB_SCRIPT_FILE_NAME="acesso_init.sql"
 RDS_DB_ENGINE="postgres"
 RDS_DB_STORAGE=20
-RDS_DB_INSTANCE_CLASS="db.t2.small"
+RDS_DB_INSTANCE_CLASS="db.t2.micro"
 RDS_SG_NAME="rds-subnet-group"
 ZONE_1="use1-az3"
 ZONE_2="use1-az4"
@@ -76,6 +76,7 @@ if [ -z "$RDS_INSTANCE" ]
         aws rds create-db-subnet-group --db-subnet-group-name "${RDS_SG_NAME}" --db-subnet-group-description "automation" --subnet-ids $SUBNET_ID_1 $SUBNET_ID_2 > /dev/null
 
         RDS_INSTANCE=$(aws rds create-db-instance \
+            --db-name ${RDS_DB_NAME} \
             --db-instance-identifier postgres-${RDS_DB_NAME} \
             --allocated-storage ${RDS_DB_STORAGE} \
             --db-instance-class ${RDS_DB_INSTANCE_CLASS} \
@@ -176,19 +177,6 @@ done
 echo "OK"
 echo "[EC2] Public DNS Name: " $EC2_DNS
 
-# EC2 Docker
-echo "[EC2] Installing Docker..."
-#echo "\"ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}\""
-ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF 
-    curl -fsSL https://get.docker.com -o get-docker.sh > /dev/null
-    sudo sh get-docker.sh
-    sudo usermod -aG docker ubuntu
-EOF
-
-printf "\n\n[EC2] Copying webapp..."
-scp -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ${EC2_WEBAPP_JAR_FILE} ubuntu@${EC2_DNS}:/home/ubuntu/
-echo "OK"
-
 #RDS Endpoint
 printf "[RDS] Waiting Endpoint..."
 end=$((SECONDS+360))
@@ -201,24 +189,59 @@ done
 echo "OK"
 echo "[RDS] Endpoint: " ${RDS_ENDPOINT}
 
-##Testa a conexão com o banco de dados RDS
-##ssh -i -o StrictHostKeyChecking=no "${EC2_KEYPAIR_NAME}.pem" ubuntu@${EC2_PUBLIC_DNS} 
+# EC2 Docker
+echo "[EC2] Installing Docker and Postgres..."
+#echo "\"ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}\""
+ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF 
+    curl -fsSL https://get.docker.com -o get-docker.sh > /dev/null
+    sudo sh get-docker.sh
+    sudo usermod -aG docker ubuntu
+    sudo apt-get install postgresql -y
+EOF
 
+printf "\n\n[EC2] Copying webapp..."
+scp -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ${EC2_WEBAPP_JAR_FILE} ubuntu@${EC2_DNS}:/home/ubuntu/
+echo "OK"
+
+# Copy database
+printf "\n\n[EC2] Copying sql file..."
+scp -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ${RDS_DB_SCRIPT_FILE_NAME} ubuntu@${EC2_DNS}:/home/ubuntu/
+echo "OK"
+
+# Restore database
+printf "\n[RDS] Restoring Database\n"
+ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF
+    echo "${RDS_ENDPOINT}:${RDS_DB_PORT}:${RDS_DB_NAME}:${RDS_DB_USER}:${RDS_DB_PASS}" > ~/.pgpass
+    chmod 0600 ~/.pgpass
+    psql \
+        -h ${RDS_ENDPOINT} \
+        -p ${RDS_DB_PORT} \
+        -U ${RDS_DB_USER} \
+        ${RDS_DB_NAME} < ${RDS_DB_SCRIPT_FILE_NAME}
+EOF
+
+#Running webapp
 printf "\n[EC2] Running webapp through java container...\n"
 echo "[EC2] ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS}"
 ssh -o StrictHostKeyChecking=no -i ${EC2_KEYPAIR_NAME}.pem ubuntu@${EC2_DNS} /bin/bash << EOF
-    docker run -p 80:9095 -v /home/ubuntu/:/usr/src/ -w /usr/src/ \
+    docker run -d -p 80:9095 -v /home/ubuntu/:/usr/src/ -w /usr/src/ \
         java:8 \
         java \
         -Dspring.datasource.url=jdbc:postgresql://${RDS_ENDPOINT}:${RDS_DB_PORT}/${RDS_DB_NAME} \
         -Dspring.datasource.username=${RDS_DB_USER} \
         -Dspring.datasource.password=${RDS_DB_PASS} \
-        -jar ${EC2_WEBAPP_JAR_FILE} -d
+        -jar acesso.jar
 EOF
-    # -Dspring.datasource.url=jdbc:postgresql://${RDS_ENDPOINT}:${RDS_PORT}/${RDS_DB_PORT} \
-    # -Dspring.datasource.username=${RDS_USER} \
-    # -Dspring.datasource.password=${RDS_PASS} \
 
-#Deletes the instance and vpc
-# aws ec2 terminate-instances --instance-ids ${EC2_INSTANCE_ID}
-# aws ec2 delete-vpc --vpc-id ${VPC_ID}
+printf "\n[EC2] Waiting..."
+sleep 10s
+echo "OK"
+
+# Open the webapp on browser
+if which xdg-open > /dev/null
+then
+  xdg-open "http://"${EC2_DNS}
+elif which gnome-open > /dev/null
+then
+  gnome-open "http://"${EC2_DNS}
+fi
